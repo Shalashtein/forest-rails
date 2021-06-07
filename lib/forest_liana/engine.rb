@@ -16,8 +16,17 @@ module ForestLiana
       begin
         rack_cors_class = Rack::Cors
         rack_cors_class = 'Rack::Cors' if Rails::VERSION::MAJOR < 5
+        null_regex = Regexp.new(/\Anull\z/)
 
         config.middleware.insert_before 0, rack_cors_class do
+          allow do
+            hostnames = [null_regex, 'localhost:4200', /\A.*\.forestadmin\.com\z/]
+            hostnames += ENV['CORS_ORIGINS'].split(',') if ENV['CORS_ORIGINS']
+
+            origins hostnames
+            resource ForestLiana::AuthenticationController::PUBLIC_ROUTES[1], headers: :any, methods: :any, credentials: true, max_age: 86400 # NOTICE: 1 day
+          end
+
           allow do
             hostnames = ['localhost:4200', /\A.*\.forestadmin\.com\z/]
             hostnames += ENV['CORS_ORIGINS'].split(',') if ENV['CORS_ORIGINS']
@@ -57,7 +66,7 @@ module ForestLiana
         ActiveStorage::Attachment
       end
 
-      if Rails::VERSION::MAJOR > 5 && defined?(Zeitwerk::Loader)
+      if Rails::VERSION::MAJOR > 5 && Rails.autoloaders.zeitwerk_enabled?
         Zeitwerk::Loader.eager_load_all
       else
         app.eager_load!

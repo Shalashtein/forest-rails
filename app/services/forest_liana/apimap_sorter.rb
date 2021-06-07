@@ -47,6 +47,7 @@ module ForestLiana
       'default_value',
       'enums',
       'is_required',
+      'is_read_only',
       'reference',
       'description',
       'position',
@@ -61,7 +62,7 @@ module ForestLiana
     def perform
       begin
         @apimap = reorder_keys_basic(@apimap)
-        sort_array_of_objects(@apimap['data']);
+        sort_array_of_objects(@apimap['data'])
         @apimap['data'].map! do |collection|
           collection = reorder_keys_child(collection)
           collection['attributes'] = reorder_collection_attributes(collection['attributes'])
@@ -91,6 +92,7 @@ module ForestLiana
           end
         end
 
+        @apimap['meta']['stack'] = reorder_keys_basic(@apimap['meta']['stack'])
         @apimap['meta'] = reorder_keys_basic(@apimap['meta'])
         @apimap
       rescue => exception
