@@ -1,13 +1,12 @@
 module ForestLiana
   class PermissionsChecker
     @@permissions_cached = Hash.new
-    @@scopes_cached = Hash.new
+    @@renderings_cached = Hash.new
     @@roles_acl_activated = false
-    # TODO: handle cache scopes per rendering
+
     @@expiration_in_seconds = (ENV['FOREST_PERMISSIONS_EXPIRATION_IN_SECONDS'] || 3600).to_i
 
-    def initialize(resource, permission_name, rendering_id, user_id: nil, smart_action_request_info: nil, collection_list_parameters: nil, query_request_info: nil)
-      
+    def initialize(resource, permission_name, rendering_id, user_id: nil, smart_action_request_info: nil, collection_list_parameters: Hash.new, query_request_info: nil)
       @collection_name = resource.present? ? ForestLiana.name_for(resource) : nil
       @permission_name = permission_name
       @rendering_id = rendering_id
@@ -39,13 +38,16 @@ module ForestLiana
         permissions['data'] = ForestLiana::PermissionsFormatter.convert_to_new_format(permissions['data'], @rendering_id)
         @@permissions_cached[@rendering_id] = permissions
       end
-      add_scopes_to_cache(permissions)
+
+      # NOTICE: Add stats permissions to the RenderingPermissions
+      permissions['data']['renderings'][@rendering_id]['stats'] = permissions['stats']
+      add_rendering_permissions_to_cache(permissions)
     end
 
-    def add_scopes_to_cache(permissions)
+    def add_rendering_permissions_to_cache(permissions)
       permissions['data']['renderings'].keys.each { |rendering_id|
-        @@scopes_cached[rendering_id] = permissions['data']['renderings'][rendering_id]
-        @@scopes_cached[rendering_id]['last_fetch'] = Time.now
+        @@renderings_cached[rendering_id] = permissions['data']['renderings'][rendering_id]
+        @@renderings_cached[rendering_id]['last_fetch'] = Time.now
       } if permissions['data']['renderings']
     end
 
@@ -59,20 +61,17 @@ module ForestLiana
         return stat_with_parameters_allowed?
       end
 
-      
-
       if permissions && permissions[@collection_name] &&
         permissions[@collection_name]['collection']
         if @permission_name === 'actions'
           return smart_action_allowed?(permissions[@collection_name]['actions'])
         else
           if @permission_name === 'browseEnabled'
-            refresh_scope_cache if scope_cache_expired?
-            scope_permissions = get_scope_in_permissions
-            if scope_permissions
-              # NOTICE: current_scope will either contains conditions filter and
-              #         dynamic user values definition, or null for collection that does not use scopes
-              return false unless are_scopes_valid?(scope_permissions)
+            refresh_rendering_cache if rendering_cache_expired?
+
+            # NOTICE: In this case we need to check that that query is allowed
+            if @collection_list_parameters[:segmentQuery].present?
+              return false unless segment_query_allowed?
             end
           end
           return is_user_allowed(permissions[@collection_name]['collection'][@permission_name])
@@ -82,23 +81,27 @@ module ForestLiana
       end
     end
 
-    def get_scope_in_permissions
-      @@scopes_cached[@rendering_id] &&
-      @@scopes_cached[@rendering_id][@collection_name] &&
-      @@scopes_cached[@rendering_id][@collection_name]['scope']
+    def get_segments_in_permissions
+      @@renderings_cached[@rendering_id] &&
+      @@renderings_cached[@rendering_id][@collection_name] &&
+      @@renderings_cached[@rendering_id][@collection_name]['segments']
     end
 
-    def scope_cache_expired?
-      return true unless @@scopes_cached[@rendering_id] && @@scopes_cached[@rendering_id]['last_fetch']
+    def rendering_cache_expired?
+      return true unless @@renderings_cached[@rendering_id] && @@renderings_cached[@rendering_id]['last_fetch']
 
-      elapsed_seconds = date_difference_in_seconds(Time.now, @@scopes_cached[@rendering_id]['last_fetch'])
+      elapsed_seconds = date_difference_in_seconds(Time.now, @@renderings_cached[@rendering_id]['last_fetch'])
       elapsed_seconds >= @@expiration_in_seconds
     end
 
-    # This will happen only on rolesACLActivated (as scope cache will always be up to date on disabled)
-    def refresh_scope_cache
+    # This will happen only on rolesACLActivated (as segments cache will always be up to date on disabled)
+    def refresh_rendering_cache
       permissions = ForestLiana::PermissionsGetter::get_permissions_for_rendering(@rendering_id, rendering_specific_only: true)
-      add_scopes_to_cache(permissions)
+
+      # NOTICE: Add stats permissions to the RenderingPermissions
+      permissions['data']['renderings'][@rendering_id]['stats'] = permissions['stats']
+
+      add_rendering_permissions_to_cache(permissions)
     end
 
     # When acl disabled permissions are stored and retrieved by rendering
@@ -112,12 +115,12 @@ module ForestLiana
     end
 
     def get_live_query_permissions_content
-      permissions = get_permissions
+      permissions = @@renderings_cached[@rendering_id]
       permissions && permissions['stats'] && permissions['stats']['queries']
     end
-    
+
     def get_stat_with_parameters_content(statPermissionType)
-      permissions = get_permissions
+      permissions = @@renderings_cached[@rendering_id]
       permissions && permissions['stats'] && permissions['stats'][statPermissionType]
     end
 
@@ -154,11 +157,13 @@ module ForestLiana
       is_user_allowed(smart_action_permissions['triggerEnabled'])
     end
 
-    def are_scopes_valid?(scope_permissions)
-      return ForestLiana::ScopeValidator.new(
-        scope_permissions['filter'],
-        scope_permissions['dynamicScopesValues']['users']
-      ).is_scope_in_request?(@collection_list_parameters)
+    def segment_query_allowed?
+      segments_queries_permissions = get_segments_in_permissions
+
+      return false unless segments_queries_permissions
+
+      # NOTICE: @query_request_info matching an existing segment query
+      return segments_queries_permissions.include? @collection_list_parameters[:segmentQuery]
     end
 
     def live_query_allowed?
@@ -166,7 +171,7 @@ module ForestLiana
 
       return false unless live_queries_permissions
 
-      # NOTICE: @query_request_info matching an existing live query 
+      # NOTICE: @query_request_info matching an existing live query
       return live_queries_permissions.include? @query_request_info
     end
 
@@ -177,7 +182,7 @@ module ForestLiana
       return false unless pool_permissions
 
       # NOTICE: equivalent to Object.values in js & removes nil values
-      array_permission_infos = @query_request_info.values.filter_map{ |x| x unless x.nil? }
+      array_permission_infos = @query_request_info.values.select{ |x| !x.nil? }
 
       # NOTICE: Is there any pool_permissions containing the array_permission_infos
       return pool_permissions.any? {
@@ -201,7 +206,7 @@ module ForestLiana
     # Used only for testing purpose
     def self.empty_cache
       @@permissions_cached = Hash.new
-      @@scopes_cached = Hash.new
+      @@renderings_cached = Hash.new
       @@roles_acl_activated = false
       @@expiration_in_seconds = (ENV['FOREST_PERMISSIONS_EXPIRATION_IN_SECONDS'] || 3600).to_i
     end
